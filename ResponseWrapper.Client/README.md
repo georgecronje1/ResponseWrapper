@@ -1,0 +1,304 @@
+Adding the `ResponseWrapper.Client` nuget package will give you access to a very fancy REST client that will auto-magically handle the ADFS Authentication process for you. 
+
+It will also take care of de-serialising the response from the server as well as logging and passing any errors or exceptions encountered back to you.
+
+The REST Client comes in two flavours:
+- ResponseWrapperService ( used by injecting `IResponseWrapperService` into your class)
+- GenericRestService ( used by injecting `IGenericRestService` into your class)
+
+For Example: 
+```
+...
+private readonly IResponseWrapperService _responseWrapperService;
+private readonly ContractsApiSettings _contractsApiSettings;
+
+public ContractsApiRestClient(IResponseWrapperService responseWrapperService, ContractsApiSettings contractsApiSettings)
+{
+    _responseWrapperService = responseWrapperService;
+    _contractsApiSettings = contractsApiSettings;
+}
+...
+```
+The flavour of client you choose will depend on the return type of the resource server you are making a call to. 
+
+The `GenericRestService` can be used for any return type. It will simple de-serialise the response to whatever type you provide it.
+
+`ResponseWrapperService` is just a specialised implementation of GenericRestService. 
+If your resource server implements the `ResponseWrapper` nuget package, all of it's responses will be wrapped in the `StandardResponse<T>` model.
+
+If you make use of ResponseWrapperService, you don't need to worry about handling anything to do with the fields of the `StandardResponse` object.
+The service will auto-magically handle any errors contained in the StandardResponse or if there are none, just return the actual data type to you. 
+
+The GenericRestService is best for cases where your resource server does not implement the `StandardResponse` and/or you wish to get back the exact response
+that was sent from the resource server. 
+
+#Modes of operation
+The client can be configured to operate in one of three "modes" depending on the type of your application
+1. Auth Header Pass-through (potentially being deprecated in favour of option 2 below)
+1. Auto-generate User Token mode
+1. Token Self-generate 
+
+##Auth Header Pass-through
+In this mode the client will automatically get the application token (and user token if available) from the incoming HTTP request and include them in the 
+out-going request to the resource server.
+This mode can only really be used with Web (API) type applications that have an incoming HttpRequest. 
+It will also potentially be deprecated in upcoming releases in favour of the next mode of operation given that it mostly operates the same but with some added
+functionality which helps keeps your system more stable. 
+
+##Auto-generate User Token
+This mode, much like the previous Header Pass-through mode, will attempt to get the required tokens from the incoming HTTP request.
+The difference being that if it cannot find a user token, it will generate a "system user" type of token and pass that on to the client. 
+It generates the system user token based on the configuration settings you give it during setup. 
+
+If it cannot find an application token in the incoming request, it will not generate one of those. 
+The assumption is that the resource server does not require one. 
+This mode can also really only be used with Web (API) type of applications where you have an incoming HTTP request. 
+
+###Setup
+In order to set up the dependancy injection for this mode:
+```
+...
+var userTokenConfig = Configuration.GetSection("ADFSConfiguration").GetSection("SystemUserToken");
+services.AddResponseWrapperClient(responseConfig =>
+{
+    var userTokenSettings = Oauth2TokenConfig.ApplicationTokenSettings.MakeDefaultWithScopes(
+        userName: userTokenConfig["UserName"],
+        password: userTokenConfig["Password"],
+        clientId: userTokenConfig["ClientId"],
+        scopes: userTokenConfig["Scopes"].Split(' ')
+    );
+
+    var authGenUserSettings = AuthGenUserSettings.Make(adfsConfig.OAuthUrl, userTokenSettings);
+
+    responseConfig.UseAutoGenUserTokenProvider(authGenUserSettings);
+});
+...
+```
+You need to pass in the required settings for:
+- The system user for your application (clientId, username, password and scopes)
+- OAuth URL (the OAuth server that will be generating the token)
+
+Your app Settings (config) file will look something like the below:
+```
+"ADFSConfiguration": {
+    "oauthUrl": "https://some-auth-server/oauth2/token",
+    "SystemUserToken": {
+      "ClientId": "<CLIENT_ID>",
+      "UserName": "<app_name_system_user>@psghub.co.za",
+      "Password": "<SUPER_SECURE_PASSWORD>",
+      "Scopes": "openid email profile"
+    }
+  }
+
+```
+
+##Token Self-generate
+This mode is best for non-HTTP applications (like console apps, batch job and/or windows services) where there is no incoming request for the tokens to be 
+pulled from. 
+Both of the tokens will be automatically generated by the service and passed on to the resource server. It also takes care of caching the tokens and
+refreshes them at the right time. 
+
+###Setup
+In order to set up the dependancy injection for this mode follow the example below. 
+I've included some sample code for extension methods that can be used to make the setup much easier:
+
+```
+public static class ResponseWrapperRegistration
+{
+    public static void AddAdfsRestServices(this IServiceCollection services, Func<Oauth2TokenConfig> getConfig)
+    {
+        var adfsConfig = getConfig();
+
+        services.AddResponseWrapperClient(config =>
+        {
+            var applicationTokenConfig = adfsConfig.ApplicationTokenConfig;
+            var userTokenConfig = adfsConfig.UserTokenConfig;
+
+            var oauth2TokenConfig = Oauth2TokenConfig.Make(
+                oauthUrl: adfsConfig.OauthUrl,
+                applicationTokenConfig: Oauth2TokenConfig.ApplicationTokenSettings.MakeDefaultWithScopes(
+                    userName: applicationTokenConfig.UserName,
+                    password: applicationTokenConfig.Password,
+                    clientId: applicationTokenConfig.ClientId,
+                    scopes: applicationTokenConfig.Scopes
+                ),
+                userTokenConfig: Oauth2TokenConfig.ApplicationTokenSettings.MakeDefaultWithScopes(
+                    userName: userTokenConfig.UserName,
+                    password: userTokenConfig.Password,
+                    clientId: userTokenConfig.ClientId,
+                    scopes: userTokenConfig.Scopes
+                )
+            );
+
+            config.UseDefaultOAuth2TokenProvider(oauth2TokenConfig);
+        });
+    }
+
+    public static Oauth2TokenConfig GetAdfsConfig(this IConfiguration configuration)
+    {
+        var adfs = configuration.GetSection("ADFSConfiguration");
+
+        var applicationToken = adfs.GetSection("ApplicationToken");
+
+        var applicationScopes = applicationToken["Scopes"].Split(' ')
+            .Select(s => s.Trim())
+            .ToArray();
+
+        var applicationTokenConfig = Oauth2TokenConfig.ApplicationTokenSettings.MakeDefaultWithScopes(
+            userName: applicationToken["UserName"],
+            password: applicationToken["Password"],
+            clientId: applicationToken["ClientId"],
+            scopes: applicationScopes
+        );
+
+
+        var userToken = adfs.GetSection("SystemUserToken");
+
+        var userScopes = userToken["Scopes"].Split(' ')
+            .Select(s => s.Trim())
+            .ToArray();
+
+        var userTokenConfig = Oauth2TokenConfig.ApplicationTokenSettings.MakeDefaultWithScopes(
+            userName: userToken["UserName"],
+            password: userToken["Password"],
+            clientId: userToken["ClientId"],
+            scopes: userScopes
+        );
+
+        var adfsConfiguration = Oauth2TokenConfig.Make(
+            oauthUrl: adfs["oauthUrl"],
+            applicationTokenConfig: applicationTokenConfig,
+            userTokenConfig: userTokenConfig
+        );
+
+        return adfsConfiguration;
+    }
+}
+```
+
+And then to call the above code (where you are setting up your DI):
+```
+...
+services.AddAdfsRestServices(() =>
+{
+    // Where `configuration` is a reference to your Configuration object
+    return configuration.GetAdfsConfig();
+});
+
+...
+```
+And your appsettings.json will look something like the below:
+```
+"ADFSConfiguration": {
+    "oauthUrl": "https://psghubnp.psg.co.za/adfs/oauth2/token",
+    "ApplicationToken": {
+        "ClientId": "<APP_CLIENT_ID>",
+        "UserName": "<app_name_system>@psghub.co.za",
+        "Password": "<SUPER_SECURE_APP_PASSWORD>",
+        "Scopes": "openid"
+    },
+    "SystemUserToken": {
+        "ClientId": "<USER_CLIENT_ID>",
+        "UserName": "<app_name_system_user>@psghub.co.za",
+        "Password": "<SUPER_SECURE_PASSWORD>",
+        "Scopes": "openid email profile"
+    }
+}
+```
+
+#Exception Handling
+You can setup the `ResponseWrapperService` or `GenericRestService` to throw a standard set of exceptions based 
+on a response's `HttpStatusCode`. You set this up by setting the `ShouldThrowStandardExceptions` flag to 
+`true` in your `IResponseWrapperRestClientConfig` configuration or your `IGenericRestClientConfig` configuration.
+
+The `HttpStatusCode` are mapped to the following standard exceptions:
+| HttpStatusCode | Exception |
+|-----------|:-----------:|
+|404|EntityNotFoundException|
+|400|BadRequestException|
+|409|BusinessRuleException|
+|401|NotAuthorisedException|
+|Other|RestException|
+
+If you choose to not use this feature, you can set the `ShouldThrowStandardExceptions` flag to `false`. The services
+will then silently return an error response, which can be handled manually in your code.
+
+#Last bit of setup
+
+In order to use the Service there is a small configuration object that you must pass along with every request. 
+This configuration object contains the `BaseUrl` of the resource server you are calling and some other minor configs. 
+
+It is recommended that you also DI this config for convenience. 
+Your configuration object must inherit from either `IResponseWrapperRestClientConfig` or `IGenericRestClientConfig`
+For example: 
+```
+//It does not have to inherit from both, that's just for the example
+//You should also always make the `UseAuthHeader` property return true
+
+public class ContractsApiSettings : IResponseWrapperRestClientConfig, IGenericRestClientConfig
+{
+    public string BaseUrl { get; set; }
+
+    public bool UseAuthHeader => true;
+
+    public bool ShouldThrowStandardExceptions  => true;
+}
+```
+It is suggested that you pull the `BaseUrl` field from your configuration and inject an intance of the above class as a singleton. 
+
+E.g.
+```
+...
+var contractsApiConfig = Configuration.GetSection("ContractsApiSettings");
+
+var contractsApiSettings = new ContractsApiSettings
+{
+    BaseUrl = contractsApiConfig["BaseUrl"]
+};
+
+services.AddSingleton(contractsApiSettings);
+...
+```
+
+#Actually using the Service
+
+To actually use the service you just inject either `IResponseWrapperService` or `IGenericRestService`
+And also your Api Settings
+
+E.g.
+```
+public class ContractsApiRestClient : IContractsApiRestClient
+{
+    private readonly IResponseWrapperService _responseWrapperService;
+    private readonly ContractsApiSettings _contractsApiSettings;
+
+    public ContractsApiRestClient(IResponseWrapperService responseWrapperService, ContractsApiSettings contractsApiSettings)
+    {
+        _responseWrapperService = responseWrapperService;
+        _contractsApiSettings = contractsApiSettings;
+    }
+...
+```
+
+##Available methods
+
+Both of the services expose a `DoGet` and a `DoPost` method (along with their Async counterparts).
+
+```
+...
+public async Task<CreateOnceOffWithdrawalResponse> SubmitOnceOffWithdrawalAsync(CreateOnceOffWithdrawalRequest request)
+{
+    var url = $"OnceOffWithdrawal/Create"; // {Controller}/{Action}
+    var result = await _responseWrapperService.DoPostAsync<CreateOnceOffWithdrawalResponse>(url, request, _contractsApiSettings).ConfigureAwait(false);
+    return result;
+}
+
+public async Task<GetBankAccountResponse> GetBankAccountAsync(string id)
+{
+    var url = $"BankAccount/get_by_id/{id}";  // {Controller}/{Action}/{parameter}
+    var result = await _responseWrapperService.DoGetAsync< GetBankAccountResponse>(url, _contractsApiSettings).ConfigureAwait(false);
+
+    return result;
+}
+...
+```

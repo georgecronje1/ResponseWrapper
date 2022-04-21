@@ -1,0 +1,14 @@
+﻿AdfsAuthenticationHandler/bin
+Psg.Core.ApplicationInsights/bin
+Psg.Core.ApplicationInsights/obj
+AdfsAuthenticationHandler/obj
+ResponcesExamples/bin
+ResponcesExamples/obj
+ResponseWrapper/bin
+ResponseWrapper/obj
+ResponseWrapper.Client/bin
+ResponseWrapper.Client/obj
+ResponseWrapper.Core/bin
+ResponseWrapper.Core/obj
+ResponseWrapper.Tests/bin
+ResponseWrapper.Tests/obj
